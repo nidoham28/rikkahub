@@ -23,7 +23,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.adaptive.currentWindowDpSize
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -66,7 +66,6 @@ import me.rerere.rikkahub.ui.context.Navigator
 import me.rerere.rikkahub.ui.hooks.ChatInputState
 import me.rerere.rikkahub.ui.hooks.EditStateContent
 import me.rerere.rikkahub.ui.hooks.useEditState
-import me.rerere.rikkahub.utils.base64Decode
 import me.rerere.rikkahub.utils.navigateToChatPage
 import org.koin.androidx.compose.koinViewModel
 import org.koin.compose.koinInject
@@ -108,13 +107,12 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
         }
     }
 
-    val windowAdaptiveInfo = currentWindowDpSize()
+    val windowAdaptiveInfo = LocalWindowInfo.current.containerDpSize
     val isBigScreen =
         windowAdaptiveInfo.width > windowAdaptiveInfo.height && windowAdaptiveInfo.width >= 1100.dp
 
     val inputState = vm.inputState
 
-    // 初始化输入状态（处理传入的 files 和 text 参数）
     LaunchedEffect(files, text) {
         if (files.isNotEmpty()) {
             val localFiles = filesManager.createChatFilesByContents(files)
@@ -124,20 +122,24 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
             val parts = buildList {
                 localFiles.forEachIndexed { index, file ->
                     val type = contentTypes.getOrNull(index)
-                    if (type?.startsWith("image/") == true) {
-                        add(UIMessagePart.Image(url = file.toString()))
-                    } else if (type?.startsWith("video/") == true) {
-                        add(UIMessagePart.Video(url = file.toString()))
-                    } else if (type?.startsWith("audio/") == true) {
-                        add(UIMessagePart.Audio(url = file.toString()))
+                    when {
+                        type?.startsWith("image/") == true -> {
+                            add(UIMessagePart.Image(url = file.toString()))
+                        }
+                        type?.startsWith("video/") == true -> {
+                            add(UIMessagePart.Video(url = file.toString()))
+                        }
+                        type?.startsWith("audio/") == true -> {
+                            add(UIMessagePart.Audio(url = file.toString()))
+                        }
                     }
                 }
             }
             inputState.messageContent = parts
         }
-        text?.base64Decode()?.let { decodedText ->
-            if (decodedText.isNotEmpty()) {
-                inputState.setMessageText(decodedText)
+        text?.let { inputText ->
+            if (inputText.isNotEmpty()) {
+                inputState.setMessageText(inputText)
             }
         }
     }
@@ -220,9 +222,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     onClearAllErrors = { vm.clearAllErrors() },
                 )
             }
-            BackHandler(drawerState.isOpen) {
-                scope.launch { drawerState.close() }
-            }
+            // REMOVED: Duplicate BackHandler - already handled at top of ChatPage
         }
     }
 }
@@ -292,32 +292,35 @@ private fun ChatPageContent(
                     },
                     onSendClick = {
                         if (currentChatModel == null) {
-                            toaster.show("请先选择模型", type = ToastType.Error)
+                            toaster.show("Please select a model first", type = ToastType.Error)
                             return@ChatInput
                         }
-                        if (inputState.isEditing()) {
+                        // Safe handling of editingMessage
+                        inputState.editingMessage?.let { editingId ->
                             vm.handleMessageEdit(
                                 parts = inputState.getContents(),
-                                messageId = inputState.editingMessage!!,
+                                messageId = editingId,
                             )
-                        } else {
+                        } ?: run {
                             vm.handleMessageSend(inputState.getContents())
                             scope.launch {
-                                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                                val targetIndex = (conversation.currentMessages.size - 1).coerceAtLeast(0)
+                                chatListState.requestScrollToItem(targetIndex)
                             }
                         }
                         inputState.clearInput()
                     },
                     onLongSendClick = {
-                        if (inputState.isEditing()) {
+                        inputState.editingMessage?.let { editingId ->
                             vm.handleMessageEdit(
                                 parts = inputState.getContents(),
-                                messageId = inputState.editingMessage!!,
+                                messageId = editingId,
                             )
-                        } else {
+                        } ?: run {
                             vm.handleMessageSend(content = inputState.getContents(), answer = false)
                             scope.launch {
-                                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                                val targetIndex = (conversation.currentMessages.size - 1).coerceAtLeast(0)
+                                chatListState.requestScrollToItem(targetIndex)
                             }
                         }
                         inputState.clearInput()
@@ -452,7 +455,7 @@ private fun TopBar(
                         scope.launch { drawerState.open() }
                     }
                 ) {
-                    Icon(HugeIcons.Menu03, "Messages")
+                    Icon(HugeIcons.Menu03, contentDescription = "Messages")
                 }
             }
         },
@@ -498,7 +501,10 @@ private fun TopBar(
                     onClickMenu()
                 }
             ) {
-                Icon(if (previewMode) HugeIcons.Cancel01 else HugeIcons.LeftToRightListBullet, "Chat Options")
+                Icon(
+                    imageVector = if (previewMode) HugeIcons.Cancel01 else HugeIcons.LeftToRightListBullet,
+                    contentDescription = "Chat Options"
+                )
             }
 
             IconButton(
@@ -506,7 +512,7 @@ private fun TopBar(
                     onNewChat()
                 }
             ) {
-                Icon(HugeIcons.MessageAdd01, "New Message")
+                Icon(HugeIcons.MessageAdd01, contentDescription = "New Message")
             }
         },
     )

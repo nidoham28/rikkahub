@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
+import android.view.Window
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -19,9 +20,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -37,6 +36,7 @@ import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.core.content.IntentCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
@@ -117,8 +117,7 @@ import okhttp3.OkHttpClient
 import org.koin.android.ext.android.inject
 import org.koin.compose.koinInject
 import kotlin.uuid.Uuid
-
-private const val TAG = "RouteActivity"
+import java.util.concurrent.CopyOnWriteArrayList
 
 class RouteActivity : ComponentActivity() {
     private val highlighter by inject<Highlighter>()
@@ -126,30 +125,23 @@ class RouteActivity : ComponentActivity() {
     private val settingsStore by inject<SettingsStore>()
     private var navStack: MutableList<NavKey>? = null
 
-    // Volume key listener registry — last registered handler wins
-    internal val volumeKeyListeners = mutableListOf<(isVolumeUp: Boolean) -> Boolean>()
-
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_DOWN) {
-            val isVolumeUp = when (event.keyCode) {
-                KeyEvent.KEYCODE_VOLUME_UP -> true
-                KeyEvent.KEYCODE_VOLUME_DOWN -> false
-                else -> return super.dispatchKeyEvent(event)
-            }
-            if (volumeKeyListeners.lastOrNull()?.invoke(isVolumeUp) == true) return true
-        }
-        return super.dispatchKeyEvent(event)
-    }
+    // Thread-safe volume key listener registry
+    internal val volumeKeyListeners = CopyOnWriteArrayList<(Boolean) -> Boolean>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         disableNavigationBarContrast()
         super.onCreate(savedInstanceState)
+
+        // Setup volume key handling via Window.Callback wrapper
+        setupVolumeKeyHandling()
+
         if (CrashHandler.hasCrashed(this)) {
             startActivity(Intent(this, SafeModeActivity::class.java))
             finish()
             return
         }
+
         setContent {
             RikkahubTheme {
                 setSingletonImageLoaderFactory { context ->
@@ -166,6 +158,33 @@ class RouteActivity : ComponentActivity() {
         }
     }
 
+    private fun setupVolumeKeyHandling() {
+        val originalCallback = window.callback
+        window.callback = object : Window.Callback by originalCallback {
+            override fun dispatchKeyEvent(event: KeyEvent?): Boolean {
+                if (event?.action == KeyEvent.ACTION_DOWN) {
+                    val isVolumeUp = when (event.keyCode) {
+                        KeyEvent.KEYCODE_VOLUME_UP -> true
+                        KeyEvent.KEYCODE_VOLUME_DOWN -> false
+                        else -> return originalCallback.dispatchKeyEvent(event)
+                    }
+                    // Last registered handler wins
+                    volumeKeyListeners.lastOrNull()?.invoke(isVolumeUp)?.let { handled ->
+                        if (handled) return true
+                    }
+                }
+                return originalCallback.dispatchKeyEvent(event)
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Prevent memory leaks
+        navStack = null
+        volumeKeyListeners.clear()
+    }
+
     private fun disableNavigationBarContrast() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.isNavigationBarContrastEnforced = false
@@ -175,25 +194,35 @@ class RouteActivity : ComponentActivity() {
     @Composable
     private fun ShareHandler(backStack: MutableList<NavKey>) {
         val shareIntent = remember {
-            Intent().apply {
-                action = intent?.action
-                putExtra(Intent.EXTRA_TEXT, intent?.getStringExtra(Intent.EXTRA_TEXT))
-                putExtra(Intent.EXTRA_STREAM, intent?.getStringExtra(Intent.EXTRA_STREAM))
-                putExtra(Intent.EXTRA_PROCESS_TEXT, intent?.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT))
+            intent?.let { safeIntent ->
+                Intent().apply {
+                    action = safeIntent.action
+                    putExtra(Intent.EXTRA_TEXT, safeIntent.getStringExtra(Intent.EXTRA_TEXT))
+                    // Use non-deprecated API for API 33+
+                    val streamUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        safeIntent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        safeIntent.getParcelableExtra(Intent.EXTRA_STREAM)
+                    }
+                    streamUri?.let { putExtra(Intent.EXTRA_STREAM, it.toString()) }
+                    putExtra(Intent.EXTRA_PROCESS_TEXT, safeIntent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT))
+                }
             }
         }
 
-        LaunchedEffect(backStack) {
-            when (shareIntent.action) {
-                Intent.ACTION_SEND -> {
-                    val text = shareIntent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
-                    val imageUri = shareIntent.getStringExtra(Intent.EXTRA_STREAM)
-                    backStack.add(Screen.ShareHandler(text, imageUri))
-                }
-
-                Intent.ACTION_PROCESS_TEXT -> {
-                    val text = shareIntent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString() ?: ""
-                    backStack.add(Screen.ShareHandler(text, null))
+        LaunchedEffect(backStack, shareIntent) {
+            shareIntent?.let { safeIntent ->
+                when (safeIntent.action) {
+                    Intent.ACTION_SEND -> {
+                        val text = safeIntent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+                        val imageUri = safeIntent.getStringExtra(Intent.EXTRA_STREAM)
+                        backStack.add(Screen.ShareHandler(text, imageUri))
+                    }
+                    Intent.ACTION_PROCESS_TEXT -> {
+                        val text = safeIntent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString() ?: ""
+                        backStack.add(Screen.ShareHandler(text, null))
+                    }
                 }
             }
         }
@@ -202,9 +231,15 @@ class RouteActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         // Navigate to the chat screen if a conversation ID is provided
-        intent.getStringExtra("conversationId")?.let { text ->
-            navStack?.add(Screen.Chat(text))
-        }    }
+        intent.getStringExtra("conversationId")?.let { conversationId ->
+            navStack?.add(Screen.Chat(
+                id = conversationId,
+                text = null,
+                files = emptyList(),
+                nodeId = null
+            ))
+        }
+    }
 
     @Composable
     fun AppRoutes() {
@@ -212,6 +247,7 @@ class RouteActivity : ComponentActivity() {
         val settings by settingsStore.settingsFlow.collectAsStateWithLifecycle()
         val tts = rememberCustomTtsState()
         val eventBus = koinInject<AppEventBus>()
+
         LaunchedEffect(tts) {
             eventBus.events.collect { event ->
                 when (event) {
@@ -219,21 +255,25 @@ class RouteActivity : ComponentActivity() {
                 }
             }
         }
+
         val migrationState by DatabaseMigrationTracker.state.collectAsStateWithLifecycle()
 
-        val startScreen = Screen.Chat(
-            id = if (readBooleanPreference("create_new_conversation_on_start", true)) {
-                Uuid.random().toString()
-            } else {
-                readStringPreference(
-                    "lastConversationId",
+        val startScreen = remember {
+            Screen.Chat(
+                id = if (readBooleanPreference("create_new_conversation_on_start", true)) {
                     Uuid.random().toString()
-                ) ?: Uuid.random().toString()
-            }
-        )
+                } else {
+                    readStringPreference("lastConversationId", Uuid.random().toString())
+                        ?: Uuid.random().toString()
+                }
+            )
+        }
 
         val backStack = rememberNavBackStack(startScreen)
-        SideEffect { this@RouteActivity.navStack = backStack }
+
+        SideEffect {
+            this@RouteActivity.navStack = backStack
+        }
 
         ShareHandler(backStack)
 
@@ -254,6 +294,7 @@ class RouteActivity : ComponentActivity() {
                     showCloseButton = true,
                 )
                 TTSController()
+
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -268,8 +309,9 @@ class RouteActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxSize(),
                         onBack = { backStack.removeLastOrNull() },
                         transitionSpec = {
-                            if (backStack.size == 1) fadeIn() togetherWith fadeOut()
-                            else {
+                            if (backStack.size <= 1) {
+                                fadeIn() togetherWith fadeOut()
+                            } else {
                                 slideInHorizontally { it } togetherWith
                                     slideOutHorizontally { -it / 2 } + scaleOut(targetScale = 0.7f) + fadeOut()
                             }
@@ -285,13 +327,29 @@ class RouteActivity : ComponentActivity() {
                         entryProvider = entryProvider {
                             entry<Screen.Chat>(
                                 metadata = NavDisplay.transitionSpec { fadeIn() togetherWith fadeOut() }
-                                        + NavDisplay.popTransitionSpec { fadeIn() togetherWith fadeOut() }
+                                    + NavDisplay.popTransitionSpec { fadeIn() togetherWith fadeOut() }
                             ) { key ->
+                                // Safe UUID parsing with fallback
+                                val chatId = try {
+                                    Uuid.parse(key.id)
+                                } catch (_: IllegalArgumentException) {
+                                    Uuid.random()
+                                }
+                                val nodeUuid = key.nodeId?.let { nodeId ->
+                                    try {
+                                        Uuid.parse(nodeId)
+                                    } catch (_: IllegalArgumentException) {
+                                        null
+                                    }
+                                }
+
                                 ChatPage(
-                                    id = Uuid.parse(key.id),
+                                    id = chatId,
                                     text = key.text,
-                                    files = key.files.map { it.toUri() },
-                                    nodeId = key.nodeId?.let { Uuid.parse(it) }
+                                    files = key.files.mapNotNull {
+                                        runCatching { it.toUri() }.getOrNull()
+                                    },
+                                    nodeId = nodeUuid
                                 )
                             }
 
@@ -375,7 +433,11 @@ class RouteActivity : ComponentActivity() {
                             }
 
                             entry<Screen.SettingProviderDetail> { key ->
-                                val id = Uuid.parse(key.providerId)
+                                val id = try {
+                                    Uuid.parse(key.providerId)
+                                } catch (_: IllegalArgumentException) {
+                                    Uuid.random()
+                                }
                                 SettingProviderDetailPage(id = id)
                             }
 
@@ -452,23 +514,13 @@ class RouteActivity : ComponentActivity() {
                             }
                         }
                     )
-                    if (BuildConfig.DEBUG) {
-                        Text(
-                            text = "[开发模式]",
-                            modifier = Modifier
-                                .align(Alignment.TopCenter)
-                                .padding(top = 4.dp),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
-                        )
-                    }
+
                     AnimatedVisibility(
                         visible = migrationState is MigrationState.Migrating,
                         enter = fadeIn(),
                         exit = fadeOut(),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        val state = migrationState as? MigrationState.Migrating
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -484,7 +536,7 @@ class RouteActivity : ComponentActivity() {
                                     text = stringResource(R.string.db_migrating),
                                     style = MaterialTheme.typography.bodyLarge
                                 )
-                                if (state != null) {
+                                (migrationState as? MigrationState.Migrating)?.let { state ->
                                     Text(
                                         text = "v${state.from} → v${state.to}",
                                         style = MaterialTheme.typography.bodySmall,

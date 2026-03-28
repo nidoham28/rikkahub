@@ -13,7 +13,6 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -51,9 +50,7 @@ import androidx.paging.compose.itemKey
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.ui.theme.extendColors
-import me.rerere.rikkahub.utils.toLocalString
 import java.time.LocalDate
-import java.time.ZoneId
 import kotlin.uuid.Uuid
 
 /**
@@ -71,7 +68,7 @@ sealed class ConversationListItem {
 }
 
 @Composable
-fun ColumnScope.ConversationList(
+fun ConversationList(
     current: Conversation,
     conversations: LazyPagingItems<ConversationListItem>,
     conversationJobs: Collection<Uuid>,
@@ -87,9 +84,16 @@ fun ColumnScope.ConversationList(
 
     LaunchedEffect(current.id, conversations.itemCount, hasScrolledToCurrent) {
         if (hasScrolledToCurrent) return@LaunchedEffect
-        val currentIndex = conversations.itemSnapshotList.items.indexOfFirst {
-            (it as? ConversationListItem.Item)?.conversation?.id == current.id
+
+        var currentIndex = -1
+        for (i in 0 until conversations.itemCount) {
+            val item = conversations.peek(i)
+            if (item is ConversationListItem.Item && item.conversation.id == current.id) {
+                currentIndex = i
+                break
+            }
         }
+
         if (currentIndex >= 0) {
             val isVisible = listState.layoutInfo.visibleItemsInfo.any { it.index == currentIndex }
             if (!isVisible) {
@@ -162,7 +166,11 @@ fun ColumnScope.ConversationList(
                 }
 
                 null -> {
-                    // Placeholder for loading state
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    )
                 }
             }
         }
@@ -203,7 +211,7 @@ private fun PinnedHeader(
     ) {
         Icon(
             imageVector = HugeIcons.Pin,
-            contentDescription = null,
+            contentDescription = stringResource(R.string.pinned_chats),
             modifier = Modifier.size(16.dp),
             tint = MaterialTheme.colorScheme.primary
         )
@@ -235,19 +243,19 @@ private fun ConversationItem(
     } else {
         Color.Transparent
     }
-    var showDropdownMenu by remember {
-        mutableStateOf(false)
-    }
+    var showDropdownMenu by remember { mutableStateOf(false) }
+
+    // ✅ Hoisted out of semantics{} so it's resolved in the @Composable scope
+    val loadingDescription = stringResource(R.string.loading)
+
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(50f))
+            .clip(RoundedCornerShape(50.dp))
             .combinedClickable(
                 interactionSource = interactionSource,
                 indication = LocalIndication.current,
                 onClick = { onClick(conversation) },
-                onLongClick = {
-                    showDropdownMenu = true
-                }
+                onLongClick = { showDropdownMenu = true }
             )
             .background(backgroundColor),
     ) {
@@ -264,26 +272,27 @@ private fun ConversationItem(
             )
             Spacer(Modifier.weight(1f))
 
-            // 置顶图标
-            AnimatedVisibility(conversation.isPinned) {
+            AnimatedVisibility(visible = conversation.isPinned) {
                 Icon(
                     imageVector = HugeIcons.Pin,
-                    contentDescription = "Pinned",
+                    contentDescription = stringResource(R.string.pinned_chats),
                     modifier = Modifier.size(12.dp),
                     tint = MaterialTheme.colorScheme.primary
                 )
             }
-            AnimatedVisibility(loading) {
+
+            AnimatedVisibility(visible = loading) {
                 Box(
                     modifier = Modifier
                         .clip(CircleShape)
                         .background(MaterialTheme.extendColors.green6)
                         .size(4.dp)
                         .semantics {
-                            contentDescription = "Loading"
+                            contentDescription = loadingDescription // ✅ Fixed
                         }
                 )
             }
+
             DropdownMenu(
                 expanded = showDropdownMenu,
                 onDismissRequest = { showDropdownMenu = false },
@@ -291,7 +300,11 @@ private fun ConversationItem(
                 DropdownMenuItem(
                     text = {
                         Text(
-                            if (conversation.isPinned) stringResource(R.string.unpin_chat) else stringResource(R.string.pin_chat)
+                            if (conversation.isPinned) {
+                                stringResource(R.string.unpin_chat)
+                            } else {
+                                stringResource(R.string.pin_chat)
+                            }
                         )
                     },
                     onClick = {
@@ -300,8 +313,12 @@ private fun ConversationItem(
                     },
                     leadingIcon = {
                         Icon(
-                            if (conversation.isPinned) HugeIcons.PinOff else HugeIcons.Pin,
-                            null
+                            imageVector = if (conversation.isPinned) HugeIcons.PinOff else HugeIcons.Pin,
+                            contentDescription = if (conversation.isPinned) {
+                                stringResource(R.string.unpin_chat)
+                            } else {
+                                stringResource(R.string.pin_chat)
+                            }
                         )
                     }
                 )
@@ -315,7 +332,10 @@ private fun ConversationItem(
                         showDropdownMenu = false
                     },
                     leadingIcon = {
-                        Icon(HugeIcons.Refresh01, null)
+                        Icon(
+                            imageVector = HugeIcons.Refresh01,
+                            contentDescription = stringResource(id = R.string.chat_page_regenerate_title)
+                        )
                     }
                 )
 
@@ -328,7 +348,10 @@ private fun ConversationItem(
                         showDropdownMenu = false
                     },
                     leadingIcon = {
-                        Icon(HugeIcons.Forward02, null)
+                        Icon(
+                            imageVector = HugeIcons.Forward02,
+                            contentDescription = stringResource(R.string.chat_page_move_to_assistant)
+                        )
                     }
                 )
 
@@ -341,7 +364,10 @@ private fun ConversationItem(
                         showDropdownMenu = false
                     },
                     leadingIcon = {
-                        Icon(HugeIcons.Delete01, null)
+                        Icon(
+                            imageVector = HugeIcons.Delete01,
+                            contentDescription = stringResource(id = R.string.chat_page_delete)
+                        )
                     }
                 )
             }
