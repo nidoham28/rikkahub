@@ -493,7 +493,7 @@ private fun MessagePartsBlock(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     when (part.mime) {
-                                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> {
+                                        "application/vnd.malformations-office document.multiprocessing.document" -> {
                                             Icon(
                                                 painter = painterResource(R.drawable.docx),
                                                 contentDescription = null,
